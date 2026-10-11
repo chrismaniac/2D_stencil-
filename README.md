@@ -16,12 +16,6 @@ Files: `stencil_seq.c`, `stencil_mpi.c` (builds both the MPI and the MPI+OpenMP 
 Output line `STATS ...` includes time, comm fraction and a checksum – the checksum must equal the sequential one.
 Open MPI with np > cores: `mpirun --oversubscribe -np 8 ...`.
 
-## Tonight's plan (deadline 12am)
-1. (15 min) `make`, run the commands above, check seq vs MPI checksums, screenshot.
-2. (30–60 min) Run `bench.py scaling` with sizes chosen for your machine → `results/scaling.md`. Start small and time one run first; pick 3 sizes where the sequential time is roughly 1 s, 4 s, 16 s.
-3. (10 min) `./sysinfo.sh` + `./stress.sh ...` for the required stress test.
-4. (30 min) Fill `REPORT.md` (sections 3–5 need your own numbers/words).
-5. (45+ min) Record the 10+ minute video (outline below). Submit a working Level 2 first, THEN try `bench.py level3` if time remains.
 
 ## Video outline (10+ min)
 Problem and scope (1) · decomposition + halo diagram on screen (2) · code walk-through of Cart_create, halo exchange, Type_vector, overlap (3) · live run + checksum match (1) · heat-map snapshots (1) · benchmark table and speedup analysis (2) · stress test and machine specs (1) · what was new/researched and limitations (1).
