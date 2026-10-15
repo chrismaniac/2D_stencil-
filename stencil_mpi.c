@@ -73,6 +73,10 @@ int main(int argc, char **argv) {
         MPI_File_write_all(f, a, 1, tile_mem, MPI_STATUS_IGNORE); MPI_File_close(&f); } } while (0)
 
     double comm_time = 0.0;
+    double post_time = 0.0;
+    double interior_time = 0.0;
+    double wait_time = 0.0;
+    double border_time = 0.0;
     MPI_Barrier(cart);
     double T0 = MPI_Wtime();
     if (dump_every > 0) DUMP(0);
@@ -95,6 +99,7 @@ int main(int argc, char **argv) {
         } else {
             /* ---------- non-blocking: post, compute interior, wait, compute border ---------- */
             MPI_Request rq[8]; int n = 0;
+            double post_start = MPI_Wtime();
             MPI_Irecv(&a[IDX(0, 1)],       (int)lx, MPI_DOUBLE, north, 1, cart, &rq[n++]);
             MPI_Irecv(&a[IDX(ly + 1, 1)],  (int)lx, MPI_DOUBLE, south, 0, cart, &rq[n++]);
             MPI_Irecv(&a[IDX(1, 0)],       1, col, west, 3, cart, &rq[n++]);
@@ -104,13 +109,37 @@ int main(int argc, char **argv) {
             MPI_Isend(&a[IDX(1, 1)],       1, col, west, 2, cart, &rq[n++]);
             MPI_Isend(&a[IDX(1, lx)],      1, col, east, 3, cart, &rq[n++]);
             comm_time += MPI_Wtime() - c0;
+            post_time += MPI_Wtime() - post_start;
+           
+double interior_start = MPI_Wtime();
+
 #ifdef _OPENMP
-            #pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static)
 #endif
-            for (long i = 2; i <= ly - 1; i++)                              /* interior: needs no halo */
-                for (long j = 2; j <= lx - 1; j++)
-                    b[IDX(i, j)] = JACOBI(a[IDX(i - 1, j)], a[IDX(i + 1, j)], a[IDX(i, j - 1)], a[IDX(i, j + 1)]);
-            c0 = MPI_Wtime(); MPI_Waitall(n, rq, MPI_STATUSES_IGNORE); comm_time += MPI_Wtime() - c0;
+for (long i = 2; i <= ly - 1; i++) {
+    for (long j = 2; j <= lx - 1; j++) {
+        b[IDX(i, j)] = JACOBI(
+            a[IDX(i - 1, j)],
+            a[IDX(i + 1, j)],
+            a[IDX(i, j - 1)],
+            a[IDX(i, j + 1)]
+        );
+    }
+}
+
+// Measure the complete interior computation once per iteration
+interior_time += MPI_Wtime() - interior_start;
+
+c0 = MPI_Wtime();
+MPI_Waitall(n, rq, MPI_STATUSES_IGNORE);
+
+
+            double wait_elapsed = MPI_Wtime() - c0;
+
+            wait_time += wait_elapsed;
+            comm_time += wait_elapsed;
+
+            double border_start = MPI_Wtime();
             for (long j = 1; j <= lx; j++) {                                /* border ring: top & bottom rows */
                 b[IDX(1, j)] = JACOBI(a[IDX(0, j)], a[IDX(2, j)], a[IDX(1, j - 1)], a[IDX(1, j + 1)]);
                 if (ly > 1) b[IDX(ly, j)] = JACOBI(a[IDX(ly - 1, j)], a[IDX(ly + 1, j)], a[IDX(ly, j - 1)], a[IDX(ly, j + 1)]);
@@ -119,6 +148,9 @@ int main(int argc, char **argv) {
                 b[IDX(i, 1)] = JACOBI(a[IDX(i - 1, 1)], a[IDX(i + 1, 1)], a[IDX(i, 0)], a[IDX(i, 2)]);
                 if (lx > 1) b[IDX(i, lx)] = JACOBI(a[IDX(i - 1, lx)], a[IDX(i + 1, lx)], a[IDX(i, lx - 1)], a[IDX(i, lx + 1)]);
             }
+
+         // ADD THIS LINE HERE
+         border_time += MPI_Wtime() - border_start;
         }
         double *t = a; a = b; b = t;
         if (dump_every > 0 && (it + 1) % dump_every == 0) DUMP(it + 1);
@@ -140,16 +172,48 @@ int main(int argc, char **argv) {
     MPI_Reduce(&heat, &heat_all, 1, MPI_DOUBLE, MPI_SUM, 0, cart);
     MPI_Reduce(&comm_time, &cmax, 1, MPI_DOUBLE, MPI_MAX, 0, cart);
     MPI_Reduce(&comm_time, &csum, 1, MPI_DOUBLE, MPI_SUM, 0, cart);
+    
+double post_sum = 0.0;
+double interior_sum = 0.0;
+double wait_sum = 0.0;
+double border_sum = 0.0;
+
+MPI_Reduce(&post_time, &post_sum, 1, MPI_DOUBLE, MPI_SUM, 0, cart);
+MPI_Reduce(&interior_time, &interior_sum, 1, MPI_DOUBLE, MPI_SUM, 0, cart);
+MPI_Reduce(&wait_time, &wait_sum, 1, MPI_DOUBLE, MPI_SUM, 0, cart);
+MPI_Reduce(&border_time, &border_sum, 1, MPI_DOUBLE, MPI_SUM, 0, cart);
+
     int threads = 1;
 #ifdef _OPENMP
     threads = omp_get_max_threads();
 #endif
     if (rank == 0) {
         double tt = T1 - T0;
-        printf("STATS impl=%s np=%d dims=%dx%d threads=%d N=%ld iters=%d mode=%s total_heat=%.6f checksum=%016llx "
-               "time=%.4f comm_max=%.4f comm_avg=%.4f comm_frac=%.3f\n",
-               threads > 1 ? "hybrid" : "mpi", P, dims[0], dims[1], threads, N, iters, overlap ? "overlap" : "blocking",
-               heat_all, (unsigned long long)cs_all, tt, cmax, csum / P, (csum / P) / tt);
+        
+printf(
+    "STATS impl=%s np=%d dims=%dx%d threads=%d "
+    "N=%ld iters=%d mode=%s "
+    "total_heat=%.6f checksum=%016llx "
+    "time=%.4f comm_max=%.4f comm_avg=%.4f "
+    "comm_frac=%.3f "
+    "post_avg=%.6f interior_avg=%.6f "
+    "wait_avg=%.6f border_avg=%.6f\n",
+    threads > 1 ? "hybrid" : "mpi",
+    P, dims[0], dims[1], threads,
+    N, iters,
+    overlap ? "overlap" : "blocking",
+    heat_all,
+    (unsigned long long)cs_all,
+    tt,
+    cmax,
+    csum / P,
+    (csum / P) / tt,
+    post_sum / P,
+    interior_sum / P,
+    wait_sum / P,
+    border_sum / P
+);
+
     }
     MPI_Type_free(&col); MPI_Type_free(&tile_mem); MPI_Type_free(&tile_file);
     MPI_Finalize();
